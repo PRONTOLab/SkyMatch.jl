@@ -715,256 +715,225 @@ function calculate_break_evens(rows)
     return values
 end
 
+function figure3_component_label(component_key, seconds)
+    if component_key == "input_placement_seconds"
+        return @sprintf("%.3f s", seconds)
+    elseif component_key == "compile_seconds"
+        return @sprintf("%.2f s", seconds)
+    elseif component_key == "runtime_seconds"
+        return seconds < 0.01 ?
+               @sprintf("%.3f ms", 1_000 * seconds) :
+               @sprintf("%.4f s", seconds)
+    elseif component_key == "materialization_seconds"
+        return @sprintf("%.4f s", seconds)
+    end
+    error("unknown Figure 3 component: $component_key")
+end
+
+function checked_figure3_break_evens(selected, break_evens)
+    calculated = Dict{Tuple{String,String},Int}()
+    for result in break_evens
+        break_even = result["break_even_k"]
+        break_even isa Integer || error(
+            "Figure 3 requires a finite integer break-even for " *
+            "$(result["backend"]) $(result["workflow"])",
+        )
+        calculated[(result["backend"], result["workflow"])] = Int(break_even)
+    end
+
+    expected = Dict(
+        (CPU_LABEL, "resident") => 31,
+        (GPU_LABEL, "resident") => 28,
+        (CPU_LABEL, "materialized catalog") => 61,
+        (GPU_LABEL, "materialized catalog") => 69,
+    )
+    julia_seconds = selected[JULIA_LABEL]["runtime_seconds"]
+    for (key, expected_break_even) in expected
+        actual = get(calculated, key, nothing)
+        @assert(
+            actual == expected_break_even,
+            "Figure 3 break-even changed for $(first(key)) $(last(key)): " *
+            "expected $expected_break_even, got $actual",
+        )
+
+        hardware_label, workflow = key
+        row = selected[hardware_label]
+        recurring_seconds = workflow == "resident" ?
+                            row["runtime_seconds"] :
+                            row["input_placement_seconds"] +
+                            row["runtime_seconds"] +
+                            row["materialization_seconds"]
+        compile_seconds = row["compile_seconds"]
+        @assert compile_seconds + actual * recurring_seconds <
+                actual * julia_seconds
+        if actual > 1
+            previous = actual - 1
+            @assert !(
+                compile_seconds + previous * recurring_seconds <
+                previous * julia_seconds
+            )
+        end
+    end
+    return calculated
+end
+
 function make_figure3(output_dir, rows, break_evens)
     selected = require_figure3_rows(rows)
+    checked_break_evens = checked_figure3_break_evens(selected, break_evens)
     figure = Figure(size=(515, 214), fontsize=8)
-    overhead_axis = Axis(
-        figure[2, 1];
-        AXIS_STYLE...,
-        yscale=log10,
-        ylabel="Time (s)",
-        xticks=(
-            1:4,
-            [
-                "Input placement",
-                "Compilation",
-                "Resident execution",
-                "Output materialization",
-            ],
-        ),
-        xticklabelrotation=pi / 8,
-        xticklabelalign=(:right, :center),
-    )
-    amortization_axis = Axis(
-        figure[2, 2];
-        AXIS_STYLE...,
-        xscale=log10,
-        yscale=log10,
-        xlabel="Same-shape executions, K",
-        ylabel="Amortized time per catalog (s)",
-    )
 
+    component_names = [
+        "Input placement",
+        "Compilation",
+        "Resident execution",
+        "Output materialization",
+    ]
     component_keys = [
         "input_placement_seconds",
         "compile_seconds",
         "runtime_seconds",
         "materialization_seconds",
     ]
-    all_components = Float64[]
-    for hardware_label in (CPU_LABEL, GPU_LABEL)
-        append!(
-            all_components,
-            Float64[selected[hardware_label][key] for key in component_keys],
-        )
-    end
-    bar_floor = minimum(all_components) / 2.5
-    bar_width = 0.34
-    for (backend_index, hardware_label) in enumerate((CPU_LABEL, GPU_LABEL))
-        offset = backend_index == 1 ? -bar_width / 2 : bar_width / 2
-        values = Float64[
-            selected[hardware_label][key] for key in component_keys
-        ]
-        bar_positions = collect(1:4) .+ offset
-        barplot!(
-            overhead_axis,
-            bar_positions,
-            values;
-            width=bar_width,
-            fillto=bar_floor,
-            color=COLORS[hardware_label],
-            strokecolor=:white,
-            strokewidth=0.5,
-        )
-        scatter!(
-            overhead_axis,
-            bar_positions,
-            values;
-            color=COLORS[hardware_label],
-            marker=MARKERS[hardware_label],
-            markersize=5.5,
-            strokecolor=:white,
-            strokewidth=0.5,
-        )
-    end
-    component_limits = log_limits(vcat(all_components, [bar_floor]); padding=0.1)
-    ylims!(overhead_axis, component_limits...)
-    xlims!(overhead_axis, 0.45, 4.55)
+    component_y = Float64[4, 3, 2, 1]
+    overhead_axis = Axis(
+        figure[2, 1];
+        AXIS_STYLE...,
+        xscale=log10,
+        xlabel="Time (s)",
+        yticks=(component_y, component_names),
+    )
 
-    k_values = 10.0 .^ range(0, 5; length=320)
-    marker_k = 10.0 .^ (0:5)
-    julia_seconds = selected[JULIA_LABEL]["runtime_seconds"]
-    hlines!(
-        amortization_axis,
-        [julia_seconds];
-        color=COLORS[JULIA_LABEL],
-        linewidth=1.8,
+    workflow_names = ["Resident workflow", "Host-output workflow"]
+    workflow_keys = ["resident", "materialized catalog"]
+    workflow_y = Float64[2, 1]
+    break_even_axis = Axis(
+        figure[2, 2];
+        AXIS_STYLE...,
+        xlabel="Break-even execution count, K",
+        xticks=0:10:70,
+        yticks=(workflow_y, workflow_names),
     )
-    scatter!(
-        amortization_axis,
-        marker_k,
-        fill(julia_seconds, length(marker_k));
-        color=COLORS[JULIA_LABEL],
-        marker=MARKERS[JULIA_LABEL],
-        markersize=5.5,
-        strokecolor=:white,
-        strokewidth=0.5,
-    )
-    for hardware_label in (CPU_LABEL, GPU_LABEL)
-        row = selected[hardware_label]
-        compile_seconds = row["compile_seconds"]
-        resident_seconds = row["runtime_seconds"]
-        catalog_seconds =
-            row["input_placement_seconds"] + resident_seconds +
-            row["materialization_seconds"]
-        resident_curve = compile_seconds ./ k_values .+ resident_seconds
-        catalog_curve = compile_seconds ./ k_values .+ catalog_seconds
+
+    backend_y_offset = Dict(CPU_LABEL => 0.14, GPU_LABEL => -0.14)
+    component_values = Float64[]
+    for (component_index, component_key) in enumerate(component_keys)
+        base_y = component_y[component_index]
+        cpu_value = Float64(selected[CPU_LABEL][component_key])
+        gpu_value = Float64(selected[GPU_LABEL][component_key])
+        append!(component_values, (cpu_value, gpu_value))
         lines!(
-            amortization_axis,
-            k_values,
-            resident_curve;
-            color=COLORS[hardware_label],
-            linestyle=:solid,
-            linewidth=1.8,
+            overhead_axis,
+            [cpu_value, gpu_value],
+            [
+                base_y + backend_y_offset[CPU_LABEL],
+                base_y + backend_y_offset[GPU_LABEL],
+            ];
+            color=(:black, 0.18),
+            linewidth=0.8,
         )
+        for (hardware_label, value) in (
+            (CPU_LABEL, cpu_value),
+            (GPU_LABEL, gpu_value),
+        )
+            y = base_y + backend_y_offset[hardware_label]
+            label_on_left = component_key == "compile_seconds"
+            scatter!(
+                overhead_axis,
+                [value],
+                [y];
+                color=COLORS[hardware_label],
+                marker=MARKERS[hardware_label],
+                markersize=6.5,
+                strokecolor=:white,
+                strokewidth=0.5,
+            )
+            text!(
+                overhead_axis,
+                value,
+                y;
+                text=figure3_component_label(component_key, value),
+                color=COLORS[hardware_label],
+                align=(label_on_left ? :right : :left, :center),
+                offset=(label_on_left ? -5 : 5, 0),
+                fontsize=7.5,
+            )
+        end
+    end
+    xlims!(overhead_axis, log_limits(component_values; padding=0.22)...)
+    ylims!(overhead_axis, 0.5, 4.5)
+
+    for (workflow_index, workflow_key) in enumerate(workflow_keys)
+        base_y = workflow_y[workflow_index]
+        cpu_break_even = checked_break_evens[(CPU_LABEL, workflow_key)]
+        gpu_break_even = checked_break_evens[(GPU_LABEL, workflow_key)]
         lines!(
-            amortization_axis,
-            k_values,
-            catalog_curve;
-            color=COLORS[hardware_label],
-            linestyle=:dash,
-            linewidth=1.8,
+            break_even_axis,
+            Float64[cpu_break_even, gpu_break_even],
+            [
+                base_y + backend_y_offset[CPU_LABEL],
+                base_y + backend_y_offset[GPU_LABEL],
+            ];
+            color=(:black, 0.18),
+            linewidth=0.8,
         )
-        scatter!(
-            amortization_axis,
-            marker_k,
-            compile_seconds ./ marker_k .+ resident_seconds;
-            color=COLORS[hardware_label],
-            marker=MARKERS[hardware_label],
-            markersize=5.5,
-            strokecolor=:white,
-            strokewidth=0.5,
+        for (hardware_label, break_even) in (
+            (CPU_LABEL, cpu_break_even),
+            (GPU_LABEL, gpu_break_even),
         )
-        scatter!(
-            amortization_axis,
-            marker_k,
-            compile_seconds ./ marker_k .+ catalog_seconds;
-            color=COLORS[hardware_label],
-            marker=MARKERS[hardware_label],
-            markersize=5.5,
-            strokecolor=:white,
-            strokewidth=0.5,
-        )
+            y = base_y + backend_y_offset[hardware_label]
+            scatter!(
+                break_even_axis,
+                [Float64(break_even)],
+                [y];
+                color=COLORS[hardware_label],
+                marker=MARKERS[hardware_label],
+                markersize=6.5,
+                strokecolor=:white,
+                strokewidth=0.5,
+            )
+            right_side = break_even >= 66
+            text!(
+                break_even_axis,
+                Float64(break_even),
+                y;
+                text="K=$break_even",
+                color=COLORS[hardware_label],
+                align=(right_side ? :right : :left, :center),
+                offset=(right_side ? -5 : 5, 0),
+                fontsize=7.5,
+            )
+        end
     end
+    xlims!(break_even_axis, 0, 75)
+    ylims!(break_even_axis, 0.5, 2.5)
 
-    curve_values = Float64[julia_seconds]
-    for hardware_label in (CPU_LABEL, GPU_LABEL)
-        row = selected[hardware_label]
-        push!(curve_values, row["compile_seconds"] + row["runtime_seconds"])
-        push!(
-            curve_values,
-            row["compile_seconds"] + row["input_placement_seconds"] +
-            row["runtime_seconds"] + row["materialization_seconds"],
-        )
-        push!(curve_values, row["runtime_seconds"])
-        push!(
-            curve_values,
-            row["input_placement_seconds"] + row["runtime_seconds"] +
-            row["materialization_seconds"],
-        )
-    end
-    amortization_limits = log_limits(curve_values; padding=0.1)
-    ylims!(amortization_axis, amortization_limits...)
-    xlims!(amortization_axis, 1, 100_000)
-
-    label_placements = Dict(
-        (CPU_LABEL, "resident") => ((4, 4), (:left, :bottom)),
-        (CPU_LABEL, "materialized catalog") => ((-4, -4), (:right, :top)),
-        (GPU_LABEL, "resident") => ((-4, 4), (:right, :bottom)),
-        (GPU_LABEL, "materialized catalog") => ((4, -4), (:left, :top)),
-    )
-    for result in break_evens
-        break_even = result["break_even_k"]
-        isnothing(break_even) && continue
-        hardware_label = result["backend"]
-        workflow = result["workflow"]
-        offset, alignment = label_placements[(hardware_label, workflow)]
-        row = selected[hardware_label]
-        recurring = workflow == "resident" ?
-                    row["runtime_seconds"] :
-                    row["input_placement_seconds"] + row["runtime_seconds"] +
-                    row["materialization_seconds"]
-        y = row["compile_seconds"] / break_even + recurring
-        scatter!(
-            amortization_axis,
-            [Float64(break_even)],
-            [Float64(y)];
-            color=COLORS[hardware_label],
-            marker=MARKERS[hardware_label],
+    legend_elements = [
+        MarkerElement(
+            color=COLORS[CPU_LABEL],
+            marker=MARKERS[CPU_LABEL],
             markersize=6.5,
-        )
-        text!(
-            amortization_axis,
-            Float64(break_even),
-            Float64(y);
-            text="K=$(break_even)",
-            color=COLORS[hardware_label],
-            align=alignment,
-            offset=offset,
-            fontsize=7.5,
-        )
-    end
-
-    legend_elements = Any[
-        [
-            LineElement(color=COLORS[JULIA_LABEL], linewidth=1.8),
-            MarkerElement(
-                color=COLORS[JULIA_LABEL],
-                marker=MARKERS[JULIA_LABEL],
-                markersize=6,
-            ),
-        ],
-        [
-            LineElement(color=COLORS[CPU_LABEL], linewidth=1.8),
-            MarkerElement(
-                color=COLORS[CPU_LABEL],
-                marker=MARKERS[CPU_LABEL],
-                markersize=6,
-            ),
-        ],
-        [
-            LineElement(color=COLORS[GPU_LABEL], linewidth=1.8),
-            MarkerElement(
-                color=COLORS[GPU_LABEL],
-                marker=MARKERS[GPU_LABEL],
-                markersize=6,
-            ),
-        ],
-        LineElement(color=:gray25, linestyle=:solid, linewidth=1.8),
-        LineElement(color=:gray25, linestyle=:dash, linewidth=1.8),
-    ]
-    legend_labels = [
-        JULIA_LABEL,
-        CPU_LABEL,
-        GPU_LABEL,
-        "Resident workflow",
-        "Materialized catalog workflow",
+        ),
+        MarkerElement(
+            color=COLORS[GPU_LABEL],
+            marker=MARKERS[GPU_LABEL],
+            markersize=6.5,
+        ),
     ]
     Legend(
         figure[1, 1:2],
         legend_elements,
-        legend_labels;
+        [CPU_LABEL, GPU_LABEL];
         orientation=:horizontal,
-        nbanks=2,
+        nbanks=1,
         framevisible=false,
         labelsize=7.5,
         patchsize=(13, 8),
-        colgap=9,
-        rowgap=1,
+        colgap=14,
         tellheight=true,
     )
 
     add_panel_label!(overhead_axis, "(a)")
-    add_panel_label!(amortization_axis, "(b)")
+    add_panel_label!(break_even_axis, "(b)")
     colgap!(figure.layout, 12)
     rowgap!(figure.layout, 1)
     save_vector_pair(figure, output_dir, "fig3_overheads_amortization")
