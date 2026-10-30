@@ -1,0 +1,44 @@
+[
+  {
+    "metric": "Pass",
+    "name": "SkyMatch Synthetic [1000000 galaxies]/forward/CUDA/Default",
+    "unit": "boolean",
+    "value": true
+  },
+  {
+    "metric": "Maximum absolute difference",
+    "name": "SkyMatch Synthetic [1000000 galaxies]/forward/CUDA/Default",
+    "unit": "absolute",
+    "value": 1728.0
+  },
+  {
+    "metric": "Maximum relative difference",
+    "name": "SkyMatch Synthetic [1000000 galaxies]/forward/CUDA/Default",
+    "unit": "relative",
+    "value": 2.480953021726801e-12
+  },
+  {
+    "metric": "Worst output field",
+    "name": "SkyMatch Synthetic [1000000 galaxies]/forward/CUDA/Default",
+    "unit": "field",
+    "value": "ICII_Lagache"
+  },
+  {
+    "metric": "rtol",
+    "name": "SkyMatch Synthetic [1000000 galaxies]/forward/CUDA/Default",
+    "unit": "relative",
+    "value": 2.0e-6
+  },
+  {
+    "metric": "atol",
+    "name": "SkyMatch Synthetic [1000000 galaxies]/forward/CUDA/Default",
+    "unit": "absolute",
+    "value": 1.0e-8
+  },
+  {
+    "metric": "Status",
+    "name": "SkyMatch Synthetic [1000000 galaxies]/forward/CUDA/Default",
+    "unit": "status",
+    "value": "complete"
+  }
+]
