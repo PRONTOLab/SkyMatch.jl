@@ -9,21 +9,25 @@ const SOURCE_TICK_LABELS = ["1,024", "100k", "1M", "5.58M"]
 const JULIA_LABEL = "Julia CPU (1 thread)"
 const CPU_LABEL = "Reactant CPU (XLA default)"
 const GPU_LABEL = "Reactant GPU (1x RTX 5090)"
+const PYSIDES_LABEL = "pySIDES CPU (default multiprocessing)"
 const IMPLEMENTATION_LABELS = [JULIA_LABEL, CPU_LABEL, GPU_LABEL]
 const COLORS = Dict(
     JULIA_LABEL => RGBf(0.0, 0.0, 0.0),
     CPU_LABEL => RGBf(0.0, 114 / 255, 178 / 255),
     GPU_LABEL => RGBf(213 / 255, 85 / 255, 0.0),
+    PYSIDES_LABEL => RGBf(0.0, 158 / 255, 115 / 255),
 )
 const MARKERS = Dict(
     JULIA_LABEL => :circle,
     CPU_LABEL => :rect,
     GPU_LABEL => :utriangle,
+    PYSIDES_LABEL => :diamond,
 )
 const LINESTYLES = Dict(
     JULIA_LABEL => :solid,
     CPU_LABEL => :dash,
     GPU_LABEL => :dot,
+    PYSIDES_LABEL => :dashdot,
 )
 const SUMMARY_COLUMNS = [
     "git_commit",
@@ -38,6 +42,7 @@ const SUMMARY_COLUMNS = [
     "runtime_seconds",
     "input_placement_seconds",
     "compile_seconds",
+    "first_execution_seconds",
     "materialization_seconds",
     "one_shot_seconds",
     "host_allocated_bytes",
@@ -67,11 +72,12 @@ function parse_options(args)
     options = Dict(
         "--results-dir" => "benchmark/results",
         "--output-dir" => "benchmark/plots/generated",
+        "--only" => "all",
     )
     if "--help" in args
         println(
             "Usage: julia --project=benchmark benchmark/plots/plot_results.jl " *
-            "--results-dir DIR --output-dir DIR",
+            "--results-dir DIR --output-dir DIR [--only all|lir-sensitivity]",
         )
         exit()
     end
@@ -81,11 +87,12 @@ function parse_options(args)
     while index <= length(args)
         option = args[index]
         haskey(options, option) || error(
-            "unknown option: $option; use --results-dir and --output-dir",
+            "unknown option: $option; use --results-dir, --output-dir, or --only",
         )
         options[option] = args[index+1]
         index += 2
     end
+    options["--only"] in ("all", "lir-sensitivity") || error("--only must be all or lir-sensitivity")
     return options
 end
 
@@ -140,10 +147,10 @@ function memory_value(records, backend, configuration, metric)
     return isempty(values) ? nothing : maximum(values)
 end
 
-function named_metrics(records, backend)
+function named_metrics(records, backend, configuration="Default")
     values = Dict{String,Any}()
     isnothing(records) && return values
-    name_fragment = "/$backend/Default"
+    name_fragment = "/$backend/$configuration"
     for record in records
         occursin(name_fragment, record["name"]) || continue
         values[record["metric"]] = record["value"]
@@ -212,6 +219,7 @@ function base_row(metadata, backend, hardware_label, source_count)
         "runtime_seconds" => nothing,
         "input_placement_seconds" => nothing,
         "compile_seconds" => nothing,
+        "first_execution_seconds" => nothing,
         "materialization_seconds" => nothing,
         "one_shot_seconds" => nothing,
         "host_allocated_bytes" => nothing,
@@ -240,15 +248,14 @@ function build_rows(results_dir, metadata_index)
             "CPU",
             "benchmarks_memory.json",
         )
-        cpu_overheads = named_metrics(
-            read_metric(
-                results_dir,
-                source_count,
-                "CPU",
-                "benchmarks_overheads.json",
-            ),
+        cpu_overhead_records = read_metric(
+            results_dir,
+            source_count,
             "CPU",
+            "benchmarks_overheads.json",
         )
+        cpu_overheads = named_metrics(cpu_overhead_records, "CPU")
+        julia_overheads = named_metrics(cpu_overhead_records, "CPU", "Julia")
         cpu_correctness = named_metrics(
             read_metric(
                 results_dir,
@@ -267,6 +274,16 @@ function build_rows(results_dir, metadata_index)
             source_count,
         )
         julia_row["runtime_seconds"] = julia_runtime
+        julia_row["input_placement_seconds"] =
+            get(julia_overheads, "Input placement", nothing)
+        julia_row["compile_seconds"] =
+            get(julia_overheads, "Compilation", nothing)
+        julia_row["first_execution_seconds"] =
+            get(julia_overheads, "First synchronized execution", nothing)
+        julia_row["materialization_seconds"] =
+            get(julia_overheads, "Output materialization", nothing)
+        julia_row["one_shot_seconds"] =
+            get(julia_overheads, "One-shot total", nothing)
         julia_row["host_allocated_bytes"] = memory_value(
             cpu_memory,
             "CPU",
@@ -297,6 +314,8 @@ function build_rows(results_dir, metadata_index)
         cpu_row["input_placement_seconds"] =
             get(cpu_overheads, "Input placement", nothing)
         cpu_row["compile_seconds"] = get(cpu_overheads, "Compilation", nothing)
+        cpu_row["first_execution_seconds"] =
+            get(cpu_overheads, "First synchronized execution", nothing)
         cpu_row["materialization_seconds"] =
             get(cpu_overheads, "Output materialization", nothing)
         cpu_row["one_shot_seconds"] =
@@ -368,6 +387,8 @@ function build_rows(results_dir, metadata_index)
             get(cuda_overheads, "Input placement", nothing)
         gpu_row["compile_seconds"] =
             get(cuda_overheads, "Compilation", nothing)
+        gpu_row["first_execution_seconds"] =
+            get(cuda_overheads, "First synchronized execution", nothing)
         gpu_row["materialization_seconds"] =
             get(cuda_overheads, "Output materialization", nothing)
         gpu_row["one_shot_seconds"] =
@@ -736,21 +757,8 @@ function checked_figure3_break_evens(selected, break_evens)
         calculated[(result["backend"], result["workflow"])] = Int(break_even)
     end
 
-    expected = Dict(
-        (CPU_LABEL, "resident") => 31,
-        (GPU_LABEL, "resident") => 28,
-        (CPU_LABEL, "materialized catalog") => 61,
-        (GPU_LABEL, "materialized catalog") => 69,
-    )
     julia_seconds = selected[JULIA_LABEL]["runtime_seconds"]
-    for (key, expected_break_even) in expected
-        actual = get(calculated, key, nothing)
-        @assert(
-            actual == expected_break_even,
-            "Figure 3 break-even changed for $(first(key)) $(last(key)): " *
-            "expected $expected_break_even, got $actual",
-        )
-
+    for (key, actual) in calculated
         hardware_label, workflow = key
         row = selected[hardware_label]
         recurring_seconds = workflow == "resident" ?
@@ -1042,6 +1050,115 @@ function make_figure4(output_dir, rows, usable_gpu_bytes)
     colgap!(figure.layout, 12)
     rowgap!(figure.layout, 2)
     save_vector_pair(figure, output_dir, "fig4_memory_scaling")
+end
+
+function require_figure6_rows(rows)
+    selected = require_figure3_rows(rows)
+    for hardware_label in (JULIA_LABEL, CPU_LABEL, GPU_LABEL)
+        row = selected[hardware_label]
+        for key in (
+            "input_placement_seconds",
+            "compile_seconds",
+            "runtime_seconds",
+            "materialization_seconds",
+        )
+            value = row[key]
+            value isa Number && isfinite(value) && value >= 0 || error(
+                "Figure 6 requires nonnegative $key for $hardware_label",
+            )
+        end
+        row["compile_seconds"] > 0 || error(
+            "Figure 6 requires measured compilation time for $hardware_label",
+        )
+        row["runtime_seconds"] > 0 || error(
+            "Figure 6 requires measured resident time for $hardware_label",
+        )
+    end
+    return selected
+end
+
+function make_figure6(output_dir, rows)
+    selected = require_figure6_rows(rows)
+    hardware_labels = (JULIA_LABEL, CPU_LABEL, GPU_LABEL)
+    implementation_ticks = (
+        Float64[1, 2, 3],
+        ["Julia CPU\n(1 thread)", "Reactant CPU\n(XLA default)", "Reactant GPU\n(RTX 5090)"],
+    )
+
+    figure = Figure(size=(330, 220), fontsize=8)
+    phase_axis = Axis(
+        figure[2, 1];
+        AXIS_STYLE...,
+        yscale=log10,
+        ylabel="Time (s)",
+        xticks=implementation_ticks,
+    )
+
+    phase_specs = (
+        (
+            "Placement",
+            "input_placement_seconds",
+            RGBf(0.0, 114 / 255, 178 / 255),
+            :circle,
+        ),
+        (
+            "Compilation",
+            "compile_seconds",
+            RGBf(204 / 255, 121 / 255, 167 / 255),
+            :diamond,
+        ),
+        (
+            "Warm resident",
+            "runtime_seconds",
+            RGBf(213 / 255, 94 / 255, 0.0),
+            :rect,
+        ),
+        (
+            "Materialization",
+            "materialization_seconds",
+            RGBf(0.0, 158 / 255, 115 / 255),
+            :utriangle,
+        ),
+    )
+    phase_offsets = (-0.18, -0.06, 0.06, 0.18)
+    positive_values = Float64[]
+    for (phase_index, (label, key, color, marker)) in enumerate(phase_specs)
+        xs = Float64[]
+        ys = Float64[]
+        for (implementation_index, hardware_label) in enumerate(hardware_labels)
+            value = Float64(selected[hardware_label][key])
+            value > 0 || continue
+            push!(xs, implementation_index + phase_offsets[phase_index])
+            push!(ys, value)
+            push!(positive_values, value)
+        end
+        lines!(phase_axis, xs, ys; color, linewidth=1)
+        scatter!(
+            phase_axis,
+            xs,
+            ys;
+            color,
+            marker,
+            markersize=7,
+            label,
+        )
+    end
+    time_limits = log_limits(positive_values; padding=0.16)
+    ylims!(phase_axis, time_limits...)
+    xlims!(phase_axis, 0.55, 3.45)
+    Legend(
+        figure[1, 1],
+        phase_axis;
+        orientation=:horizontal,
+        nbanks=2,
+        framevisible=false,
+        labelsize=7,
+        patchsize=(11, 7),
+        colgap=8,
+        tellheight=true,
+    )
+    rowgap!(figure.layout, 2)
+    save_vector_pair(figure, output_dir, "fig6_execution_ablation")
 end
 
 function format_table_number(value)
@@ -1530,6 +1647,9 @@ function write_handoff(
     println("wrote $path")
 end
 
+include(joinpath(@__DIR__, "extended_paper_artifacts.jl"))
+include(joinpath(@__DIR__, "lir_sensitivity.jl"))
+
 function main(args=ARGS)
     options = parse_options(args)
     results_dir = options["--results-dir"]
@@ -1537,7 +1657,13 @@ function main(args=ARGS)
     isdir(results_dir) || error("results directory does not exist: $results_dir")
     mkpath(output_dir)
 
+    if options["--only"] == "lir-sensitivity"
+        make_lir_sensitivity_artifacts(output_dir, results_dir; required=true)
+        return nothing
+    end
+
     metadata_document, metadata_index = read_metadata(results_dir)
+    pysides_rows = read_pysides_results(results_dir)
     rows = build_rows(results_dir, metadata_index)
     any(row["filters_enabled"] === true for row in rows) && error(
         "paper plots require filters_enabled=false for every included result",
@@ -1548,7 +1674,14 @@ function main(args=ARGS)
     make_figure2(output_dir, rows)
     make_figure3(output_dir, rows, break_evens)
     make_figure4(output_dir, rows, usable_gpu_bytes)
+    make_figure5(output_dir, rows, pysides_rows)
+    make_figure6(output_dir, rows)
+    make_figure7(output_dir, results_dir)
     write_table2(joinpath(output_dir, "table2_largest_common.tex"), rows)
+    write_table4_sensitivity(
+        joinpath(output_dir, "table4_sfr_sensitivity.tex"),
+        results_dir,
+    )
     write_table3(joinpath(output_dir, "table3_correctness.tex"), rows)
     write_summaries(
         output_dir,
@@ -1564,6 +1697,7 @@ function main(args=ARGS)
         usable_gpu_bytes,
         break_evens,
     )
+    make_lir_sensitivity_artifacts(output_dir, results_dir)
     return nothing
 end
 

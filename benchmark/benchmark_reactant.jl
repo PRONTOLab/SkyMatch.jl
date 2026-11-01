@@ -28,8 +28,9 @@ Chairmarks for both Julia and Reactant; accelerator runtime and FLOP/s use
 XProf. A separate memory JSON records host allocations and XProf backend-memory
 peaks. Ordinary Julia is recorded only for CPU runs; every backend is checked
 against it. The 1,000,000-row invocation also records placement, compilation,
-complete materialization, and one-shot overheads. Every successful invocation
-records field-by-field correctness extrema.
+complete materialization, and one-shot overheads. The CPU invocation also
+records native Julia first-call and JIT-compilation time. Every successful
+invocation records field-by-field correctness extrema.
 """
     )
 end
@@ -137,6 +138,7 @@ function run_all_benchmarks(options, args=ARGS)
         if !isnothing(measurement.overheads)
             save_overhead_results(
                 measurement.overheads,
+                measurement.julia_overheads,
                 options.results_dir,
                 prefix,
                 backend,

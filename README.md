@@ -127,10 +127,14 @@ Figure 1 | Not generated (LaTeX/TikZ) | BayesMMfwd implementation architecture
 Figure 2 | benchmark/plots/generated/fig2_runtime_speedup.pdf | Warm runtime and speedup
 Figure 3 | benchmark/plots/generated/fig3_overheads_amortization.pdf | Measured overheads and derived amortization
 Figure 4 | benchmark/plots/generated/fig4_memory_scaling.pdf | GPU peak memory and host allocation traffic
+Figure 5 | benchmark/plots/generated/fig5_implementation_runtime.pdf | pySIDES-to-GPU model-runtime scaling
+Figure 6 | benchmark/plots/generated/fig6_execution_ablation.pdf | 1,000,000-source execution-overhead ablation
+Figure 7 | benchmark/plots/generated/fig7_sfr_sensitivity_runtime.pdf | Enzyme SFR-sensitivity runtime
 Table II | benchmark/plots/generated/table2_largest_common.tex | 1,000,000-source comparison
 Table III | benchmark/plots/generated/table3_correctness.tex | Julia/Reactant numerical agreement
+Table IV | benchmark/plots/generated/table4_sfr_sensitivity.tex | a0-to-SFR sensitivity agreement
 
-The complete paper matrix consists of these eight commands. Every command writes
+The existing Julia/Reactant forward matrix consists of these eight commands. Every command writes
 uniquely named sibling JSON files directly into the same canonical raw
 directory:
 
@@ -144,6 +148,69 @@ julia --startup-file=no --history-file=no --project=benchmark benchmark/benchmar
 julia --startup-file=no --history-file=no --project=benchmark benchmark/benchmark_reactant.jl --large --rows 1000000 --backend CUDA --results-dir benchmark/results
 julia --startup-file=no --history-file=no --project=benchmark benchmark/benchmark_reactant.jl --large --rows 5584998 --backend CUDA --results-dir benchmark/results
 ```
+For Figure 5, use the pinned public pySIDES release and its isolated Python
+environment:
+
+```bash
+git clone https://gitlab.lam.fr/mbethermin/sides-public-release.git sides-public-release
+git -C sides-public-release checkout b447ca818e62fd54ca0da797b737e7485af79b03
+python3 -m venv benchmark/.venv-pysides
+benchmark/.venv-pysides/bin/pip install -r benchmark/pysides-requirements.txt
+for n in 1024 100000 1000000 5584998; do
+  benchmark/.venv-pysides/bin/python benchmark/benchmark_pysides.py \
+    --rows "$n" --results-dir benchmark/results --timeout-seconds 600
+done
+```
+
+pySIDES uses its released default `multiprocessing.Pool(cpu_count())` policy.
+Figure 5 reports each implementation's native model-execution scope: pySIDES
+includes its complete pandas host catalog, while the existing Reactant values
+are warm resident executions. It is not an end-to-end I/O comparison.
+
+Generate the SFR sensitivity data for Figure 7 and Table IV with:
+
+```bash
+for backend in CPU CUDA; do
+  for n in 1024 100000 1000000 5584998; do
+    julia --startup-file=no --history-file=no --project=benchmark \
+      benchmark/benchmark_sfr_sensitivity.jl --rows "$n" \
+      --backend "$backend" --results-dir benchmark/results
+  done
+done
+```
+
+This differentiates `mean(log1p(SFR / sfr_scale))` with respect to `a0`
+while holding the catalog and seed-1234 noise fixed. Table IV checks Enzyme
+against a five-point central finite difference at 1,000,000 sources.
+
+The default plotting command requires the forward matrix, pySIDES results,
+SFR sensitivity results, and the 1,000,000-source Julia compilation measurements.
+Older forward-only results are insufficient for Figures 5–7 and Table IV.
+
+For the additional per-galaxy infrared-luminosity sensitivity plot, run:
+
+```bash
+julia --startup-file=no --history-file=no --project=benchmark benchmark/test_lir_sensitivity.jl
+for backend in CPU CUDA; do
+  for n in 1024 100000 1000000 5584998; do
+    julia --startup-file=no --history-file=no --project=benchmark \
+      benchmark/benchmark_lir_sensitivity.jl --rows "$n" \
+      --backend "$backend" --results-dir benchmark/results
+  done
+done
+julia --startup-file=no --history-file=no --project=benchmark \
+  benchmark/plots/plot_results.jl --results-dir benchmark/results \
+  --output-dir benchmark/plots/generated --only lir-sensitivity
+```
+
+This uses forward-mode Enzyme to calculate `dLIR_i/dsigma_MS`, holding galaxy
+classifications and seed-1234 random draws fixed. It measures the SFR-to-LIR
+calculation, not the complete forward model. CPU derivatives are checked against
+five-point finite differences at two step sizes; Reactant derivatives are checked
+against Julia. The default plotting command also generates these artifacts when
+LIR results are present. Preserve the raw result JSON and environment manifests
+alongside archived paper artifacts to retain the exact measured runs; they are
+local outputs and are not included in the source repository.
 
 Run each command once. Each invocation relies on the harness's internal
 Chairmarks sampling for Julia and Reactant CPU or its synchronized 25-execution
@@ -157,9 +224,11 @@ the generated artifacts; it is not an artifact-generation failure.
 
 Expected results: Reactant CPU should cross over after the smallest catalog, and
 the single GPU should be fastest at the larger successfully measured sizes.
-These are qualitative checks only. Consult
-benchmark/plots/generated/results_summary.json for the exact recorded values,
-status of every point, correctness extrema, and break-even calculations.
+These are qualitative checks only. Consult the generated
+`results_summary.json` for the original forward matrix, the
+`pysides_forward_*_CPUbenchmarks.json` files for Figure 5, and the
+`bayesmmfwd_sfr_sensitivity_*benchmarks.json` files for Figure 7. Their
+correctness siblings provide the Table IV values.
 
 ## Tests
 

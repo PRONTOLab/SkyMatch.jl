@@ -42,6 +42,7 @@ end
 
 function save_overhead_results(
     overheads,
+    julia_overheads,
     results_dir::String,
     prefix::String,
     backend::String,
@@ -60,7 +61,32 @@ function save_overhead_results(
         results_dir,
         string(prefix, "_", backend, "benchmarks_overheads.json"),
     )
-    write_json(path, metric_rows(name, metrics))
+    rows = metric_rows(name, metrics)
+    if !isnothing(julia_overheads)
+        julia_name = string(benchmark_name, "/CPU/Julia")
+        julia_metrics = (
+            ("Input placement", julia_overheads.input_placement_seconds, "s"),
+            ("Compilation", julia_overheads.compile_seconds, "s"),
+            (
+                "First synchronized execution",
+                julia_overheads.first_execution_seconds,
+                "s",
+            ),
+            (
+                "Resident execution",
+                julia_overheads.resident_execution_seconds,
+                "s",
+            ),
+            (
+                "Output materialization",
+                julia_overheads.materialization_seconds,
+                "s",
+            ),
+            ("One-shot total", julia_overheads.one_shot_seconds, "s"),
+        )
+        append!(rows, metric_rows(julia_name, julia_metrics))
+    end
+    write_json(path, rows)
     @info "Saved overhead results" overheads = path
     return path
 end

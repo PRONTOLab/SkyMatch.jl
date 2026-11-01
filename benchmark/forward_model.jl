@@ -90,6 +90,21 @@ function timed_input_placement(cpu_args)
     return ra_args, elapsed_seconds
 end
 
+function measure_julia_overheads(fn, cpu_args)
+    GC.gc(true)
+    first_call = @timed fn(cpu_args...)
+    force_host_completion(first_call.value)
+    first_execution_seconds = max(first_call.time - first_call.compile_time, 0.0)
+    overheads = (;
+        input_placement_seconds=0.0,
+        compile_seconds=first_call.compile_time,
+        first_execution_seconds,
+        materialization_seconds=0.0,
+        one_shot_seconds=first_call.time,
+    )
+    return first_call.value, overheads
+end
+
 function measure_reactant_overheads(fn, cpu_args)
     ra_args, input_placement_seconds = timed_input_placement(cpu_args)
     compile_options = Reactant.__compile_options_with_updated_sync(
@@ -144,6 +159,13 @@ function run_bayesmmfwd_benchmark!(
     mode = filters ? "forward_filters" : "forward"
     benchmark_name = "BayesMMfwd [$n_gal galaxies]/$mode"
 
+    julia_overheads = nothing
+    julia_first_output = nothing
+    if n_gal == 1_000_000 && backend == "CPU"
+        julia_first_output, julia_overheads =
+            measure_julia_overheads(BayesMMfwd.forward_model, cpu_args)
+    end
+
     overheads = nothing
     overhead_host_output = nothing
     if n_gal == 1_000_000
@@ -163,7 +185,8 @@ function run_bayesmmfwd_benchmark!(
         ra_args;
         configs=[BenchmarkConfiguration("Default")],
     )
-    reference = BayesMMfwd.forward_model(cpu_args...)
+    reference = isnothing(julia_first_output) ?
+                BayesMMfwd.forward_model(cpu_args...) : julia_first_output
     candidate = if isnothing(overhead_host_output)
         materialized = materialize_output(reactant_output)
         force_host_completion(materialized)
@@ -178,5 +201,10 @@ function run_bayesmmfwd_benchmark!(
         resident_execution_seconds = results["Runtime (s)"][reactant_name]
         overheads = merge(overheads, (; resident_execution_seconds))
     end
-    return (; n_gal, benchmark_name, overheads, correctness)
+    if !isnothing(julia_overheads)
+        julia_name = string(benchmark_name, "/CPU/Julia")
+        resident_execution_seconds = results["Runtime (s)"][julia_name]
+        julia_overheads = merge(julia_overheads, (; resident_execution_seconds))
+    end
+    return (; n_gal, benchmark_name, overheads, julia_overheads, correctness)
 end

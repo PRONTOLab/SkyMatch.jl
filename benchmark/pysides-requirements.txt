@@ -1,0 +1,6 @@
+# Environment used for the pySIDES paper baseline (Python 3.12.3).
+astropy==8.0.1
+ipython==9.16.1
+numpy==2.5.2
+pandas==3.0.5
+scipy==1.18.0
