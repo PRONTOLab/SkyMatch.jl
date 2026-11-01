@@ -9,7 +9,6 @@ using Serialization
 using Statistics
 using Dates
 using FFTW
-using Interpolations
 using HDF5
 using Distributed
 
