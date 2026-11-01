@@ -91,6 +91,33 @@ Add `--write-output` to write the configured FITS catalog, `--rows N` to
 limit a run, or `--filters` to include configured filter fluxes. Run with
 `--help` for all options.
 
+## Sky maps and spectral cubes
+
+`SkyMatch.make_maps(catalog, map_parameters, model_parameters)` bins catalog
+columns named `S<filter>` (flux density in Jy) and writes FITS images. If a filter
+column is absent, it computes it from the configured HDF5 filter grid and the
+catalog's `redshift`, `Umean`, `LIR`, `mu`, `issb`, and `qflag` columns. Supply
+`ra` and `dec` in degrees; otherwise coordinates are drawn once using
+`map_parameters["field_size"]` and attached to the catalog. Seed Julia's RNG
+before that call for reproducibility.
+
+`SkyMatch.make_cube(catalog, model_parameters, cube_parameters)` adds continuum
+and line emission in spectral channels. Frequency parameters (`freq_min`,
+`freq_max`, `freq_resol`) are in Hz; model line rest frequencies are in GHz,
+integrated catalog line fluxes are in Jy km/s, and numeric `Dlum` is in Mpc.
+Channel centers follow `freq_min:freq_resol:freq_max`; a nonaligned upper bound
+is excluded rather than changing the requested channel spacing.
+Combined `save_full`/`save_all_lines` outputs are generated per enabled CII
+recipe: enable `gen_cube_CII_Lagache` or `gen_cube_CII_de_Looze` for those files.
+
+Internal images use `(y, x)` and cubes use `(frequency, y, x)`; FITS output uses
+`(x, y)` and `(x, y, frequency)` to match its WCS headers. Beam smoothing uses
+periodic FFT convolution, so sources near an edge can wrap across the field.
+These map/cube operations run on the host after the numerical forward model.
+
+A self-contained [synthetic-catalog demo](examples/README.md) produces sky maps
+and Enzyme luminosity sensitivities without external catalogs or SED tables.
+
 ## Performance and reproducibility
 
 The Julia-versus-Reactant harness is isolated under [`benchmark/`](benchmark/).

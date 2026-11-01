@@ -1,4 +1,6 @@
 using Test
+include("maps.jl")
+include("cubes.jl")
 import Reactant
 using DataFrames: DataFrame, names, nrow
 using HDF5: h5open

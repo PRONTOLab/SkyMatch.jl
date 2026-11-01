@@ -183,8 +183,8 @@ function compute_histogram2d(y::AbstractVector, x::AbstractVector, y_edges::Abst
     histo = zeros(Float64, ny, nx)
     
     for i in eachindex(x)
-        iy = floor(Int, y[i] + 0.5) + 1
-        ix = floor(Int, x[i] + 0.5) + 1
+        iy = searchsortedlast(y_edges, y[i])
+        ix = searchsortedlast(x_edges, x[i])
         
         if 1 <= iy <= ny && 1 <= ix <= nx
             histo[iy, ix] += weights[i]
@@ -202,9 +202,9 @@ function compute_histogram3d(z::AbstractVector, y::AbstractVector, x::AbstractVe
     histo = zeros(Float64, nz, ny, nx)
     
     for i in eachindex(x)
-        iz = floor(Int, z[i] + 0.5) + 1
-        iy = floor(Int, y[i] + 0.5) + 1
-        ix = floor(Int, x[i] + 0.5) + 1
+        iz = searchsortedlast(z_edges, z[i])
+        iy = searchsortedlast(y_edges, y[i])
+        ix = searchsortedlast(x_edges, x[i])
         
         if 1 <= iz <= nz && 1 <= iy <= ny && 1 <= ix <= nx
             histo[iz, iy, ix] += weights[i]
@@ -231,92 +231,26 @@ function grouper(N::Int, n::Int)
     return [chunk for chunk in chunks if !isempty(chunk)]
 end
 
-function worker(ks, lambda_list, stype, Uindex, SED_dict, redshift)
-    ks = filter(!isnothing, ks)
-    N_gal = length(ks)
-    N_lambda = length(lambda_list)
-    nuLnu = zeros(Float64, N_gal, N_lambda)
-
-    redshift_subset = redshift[ks]
-    redshift_col = reshape(redshift_subset, N_gal, 1)
-    lambda_rest = (lambda_list ./ (1.0 .+ redshift_col)) .* u"μm"
-
-    c_speed_q = uconvert(u"m/s", c_speed * u"m/s")
-    nu_rest_Hz = (c_speed_q ./ (lambda_rest .|> u"m")) .|> u"Hz"
-
-    for i in 1:N_gal
-        k = ks[i]
-        lambda_interp_x = SED_dict["lambda"]
-        sed_data = SED_dict[stype[k]][:, Uindex[k]]
-
-        interp_itp = LinearInterpolation(lambda_interp_x, sed_data, extrapolation_bc=Line())
-        lambda_rest_row = lambda_rest[i, :] .|> Unitful.NoUnits
-        nuLnu_row = interp_itp.(lambda_rest_row)
-        nuLnu[i, :] = nuLnu_row
-    end
-
-    nuLnu_quantified = nuLnu .* u"W"
-    return (nuLnu_quantified ./ nu_rest_Hz) .|> Unitful.NoUnits
-end
-
+"""Monochromatic flux densities in Jy; wavelengths are μm and numeric Dlum is Mpc."""
 function gen_Snu_arr(lambda_list, SED_dict, redshift, LIR, Umean, Dlum, issb)
-    N_total = length(redshift)
-    stype = [a ? "nuLnu_SB_arr" : "nuLnu_MS_arr" for a in issb]
-
-    Umean_min = SED_dict["Umean"][1]
-    dU = SED_dict["dU"]
-
-    Uindex = round.((Umean .- Umean_min) ./ dU)
-    Uindex = Int.(Uindex)
-
-    Umax_index = length(SED_dict["Umean"])
-    Uindex = max.(Uindex, 1)
-    Uindex = min.(Uindex, Umax_index)
-
-    CPU_COUNT = Sys.CPU_THREADS
-    index_chunks = grouper(N_total, CPU_COUNT)
-
-    Worker_partial(ks) = worker(
-        ks,
-        lambda_list,
-        stype,
-        Uindex,
-        SED_dict,
-        redshift
+    wavelengths = Float64.(vec(SED_dict["lambda"]))
+    umean = Float64.(vec(SED_dict["Umean"]))
+    tables = (
+        lambda=wavelengths,
+        dU=Float64(SED_dict["dU"]),
+        Umean=umean,
+        nuLnu_MS=Float64.(orient_sed_matrix(
+            SED_dict["nuLnu_MS_arr"], length(wavelengths), length(umean), "nuLnu_MS_arr")),
+        nuLnu_SB=Float64.(orient_sed_matrix(
+            SED_dict["nuLnu_SB_arr"], length(wavelengths), length(umean), "nuLnu_SB_arr")),
     )
-
-    L_nu_over_nu_chunks = nprocs() > 1 ? pmap(Worker_partial, index_chunks) : map(Worker_partial, index_chunks)
-    concatenated_worker_output = vcat(L_nu_over_nu_chunks...)
-
-    L_sun_W = 3.828e26 * u"W"
-    LIR_col = reshape(LIR, N_total, 1)
-    Lnu = L_sun_W .* LIR_col .* concatenated_worker_output ./ u"Hz"
-
-    redshift_col = reshape(redshift, N_total, 1)
-    Numerator = Lnu .* (1.0 .+ redshift_col) .* (1.0 / (pi * 4.0))
-
-    Dlum_m_squared = (Dlum .|> u"m") .^ 2
-    Denominator = reshape(Dlum_m_squared, N_total, 1)
-
-    Snu_arr = (Numerator ./ Denominator) .|> u"Jy"
-    return Snu_arr
+    dlum_m = [d isa Unitful.AbstractQuantity ? ustrip(u"m", d) : d * MPC_TO_M for d in Dlum]
+    return generate_monochromatic_fluxes(
+        Float64.(lambda_list), tables, redshift, LIR, Umean, dlum_m, issb,
+    )
 end
 
-function load_sed_pickle_equivalent(file_path::String)
-    println("Loading data from hdf5 file: $file_path")
-    SEDData = Dict{String, Any}()
-    try
-        h5open(file_path, "r") do f
-            for key in keys(f)
-                SEDData[key] = read(f[key])
-            end
-        end
-        println("Successfully loaded SEDData from HDF5!")
-    catch e
-        println("Error loading HDF5 file: ", e)
-    end
-    return SEDData
-end
+load_sed_pickle_equivalent(file_path::String) = read_hdf5_dict(file_path)
 
 
 # World coordinate system (WCS) and kernel computations
@@ -333,6 +267,8 @@ function gen_radec(cat::DataFrame, params::Dict)
 end
 
 function set_wcs_map(cat::DataFrame, pixel_size::Real, params::Dict)
+    nrow(cat) > 0 || throw(ArgumentError("cannot map an empty catalog"))
+    isfinite(pixel_size) && pixel_size > 0 || throw(ArgumentError("pixel_size must be positive and finite"))
     local ra, dec
     if !("ra" in names(cat)) || !("dec" in names(cat))
         println("generating the coordinates of the sources")
@@ -365,15 +301,16 @@ function set_wcs_map(cat::DataFrame, pixel_size::Real, params::Dict)
     y = pixcoords[2, :]
     
     w.crpix = [
-        0.5 * delta_ra / pix_resol - minimum(x),
-        0.5 * delta_dec / pix_resol - minimum(y)
+        0.5 * delta_ra / pix_resol - minimum(x) + 1,
+        0.5 * delta_dec / pix_resol - minimum(y) + 1
     ]
     
     pixcoords = world_to_pix(w, worldcoords)
     x = pixcoords[1, :]
     y = pixcoords[2, :]
     
-    pos = [y, x]
+    # WCS/FITS pixels start at one; histogram coordinates start at zero.
+    pos = [y .- 1, x .- 1]
     
     shape_val = [Int(ceil(maximum(y))), Int(ceil(maximum(x)))]
     shape = [div(i, 2) * 2 + 1 for i in shape_val]
@@ -391,112 +328,49 @@ function set_wcs_map(cat::DataFrame, pixel_size::Real, params::Dict)
     return wcs_dict
 end
 
+function cube_frequencies(params::Dict)
+    lo, hi, step = params["freq_min"], params["freq_max"], params["freq_resol"]
+    all(isfinite, (lo, hi, step)) && lo > 0 && hi >= lo && step > 0 ||
+        throw(ArgumentError("cube frequencies must be finite and positive, with freq_max >= freq_min"))
+    return collect(lo:step:hi)
+end
+
 function set_wcs(cat::DataFrame, params::Dict)
-    local ra, dec
-    if !("ra" in names(cat)) || !("dec" in names(cat))
-        println("generating the coordinates of the sources")
-        ra, dec = gen_radec(cat, params)
-    else
-        ra = cat.ra .* u"°"
-        dec = cat.dec .* u"°"
-    end
-    
-    ra_val = ustrip.(u"°", ra)
-    dec_val = ustrip.(u"°", dec)
-
-    pix_resol = params["pixel_size"] / 3600.
-
-    ra_cen = 0.5 * (maximum(ra_val) + minimum(ra_val))
-    dec_cen = 0.5 * (maximum(dec_val) + minimum(dec_val))
-    delta_ra = maximum(ra_val) - minimum(ra_val)
-    delta_dec = maximum(dec_val) - minimum(dec_val)
-
-    w_celestial = WCSTransform(2)
-    w_celestial.crval = [ra_cen, dec_cen]
-    w_celestial.crpix = [0.5 * delta_ra / pix_resol, 0.5 * delta_dec / pix_resol]
-    w_celestial.cdelt = [pix_resol, pix_resol]
-    w_celestial.ctype = ["RA---TAN", "DEC--TAN"]
-    w_celestial.cunit = ["deg", "deg"]
-
-    worldcoords = vcat(ra_val', dec_val')
-    pixcoords = world_to_pix(w_celestial, worldcoords)
-    x = pixcoords[1, :]
-    y = pixcoords[2, :]
-
-    w_celestial.crpix = [
-        0.5 * delta_ra / pix_resol - minimum(x),
-        0.5 * delta_dec / pix_resol - minimum(y)
-    ]
-
-    pixcoords = world_to_pix(w_celestial, worldcoords)
-    x = pixcoords[1, :]
-    y = pixcoords[2, :]
-    pos = [y, x]
-
-    zmax = (params["freq_max"] - params["freq_min"]) / params["freq_resol"]
-
-    shape_val = [Int(floor(zmax + 1)), Int(ceil(maximum(y))), Int(ceil(maximum(x)))]
-    shape = [div(i, 2) * 2 + 1 for i in shape_val]
-
-    x_edges = collect(-0.5:1.0:(shape[3] - 0.5))
-    y_edges = collect(-0.5:1.0:(shape[2] - 0.5))
-    z_edges = collect(-0.5:1.0:(shape[1] - 0.5))
-
+    sky = set_wcs_map(cat, params["pixel_size"], params)
+    frequencies = cube_frequencies(params)
+    celestial = sky["w"]
     w = WCSTransform(3)
-    w.crval = [ra_cen, dec_cen, params["freq_min"]]
-    w.crpix = [w_celestial.crpix[1], w_celestial.crpix[2], 1.0]
-    w.cdelt = [pix_resol, pix_resol, params["freq_resol"]]
+    w.crval = [celestial.crval[1], celestial.crval[2], first(frequencies)]
+    w.crpix = [celestial.crpix[1], celestial.crpix[2], 1.0]
+    w.cdelt = [celestial.cdelt[1], celestial.cdelt[2], params["freq_resol"]]
     w.ctype = ["RA---TAN", "DEC--TAN", "FREQ"]
     w.cunit = ["deg", "deg", "Hz"]
-
-    wcs_dict = Dict{String, Any}(
+    return Dict{String,Any}(
         "w" => w,
-        "shape" => shape,
-        "pos" => pos,
-        "x_edges" => x_edges,
-        "y_edges" => y_edges,
-        "z_edges" => z_edges
+        "shape" => [length(frequencies), sky["shape"]...],
+        "pos" => sky["pos"],
+        "x_edges" => sky["x_edges"],
+        "y_edges" => sky["y_edges"],
+        "z_edges" => collect(-0.5:1.0:(length(frequencies) - 0.5)),
     )
-    return wcs_dict
 end
 
 function set_kernel(params::Dict, cube_prop_dict::Dict)
     w = cube_prop_dict["w"]
-    N_chan = cube_prop_dict["shape"][1]
-    kernel_size = cube_prop_dict["shape"][2]
-
+    nchan, ny, nx = cube_prop_dict["shape"]
+    diameter = params["telescop_diameter"]
+    isfinite(diameter) && diameter > 0 || throw(ArgumentError("telescope diameter must be positive"))
     kernel = Matrix{Float64}[]
     beam_area_pix2 = Float64[]
-
-    start_freq_idx = round(Int, w.crval[3] / w.cdelt[3])
-
-    for chan_idx in 1:N_chan
-        freq_idx = start_freq_idx + (chan_idx - 1)
-        freq_Hz = freq_idx * w.cdelt[3]
-
-        fwhm_rad = (1.22 * c_speed) / (freq_Hz * params["telescop_diameter"])
-        fwhm_arcsec = fwhm_rad * (180.0 / pi) * 3600.0
-        sigma_arcsec = fwhm_arcsec * gaussian_fwhm_to_sigma
-        sigma_pix = sigma_arcsec / params["pixel_size"]
-
-        N = kernel_size
-        cx = (N + 1) / 2
-        cy = (N + 1) / 2
-        kernel_channel = zeros(Float64, N, N)
-        
-        for j in 1:N, i in 1:N
-            dx = i - cx
-            dy = j - cy
-            kernel_channel[i, j] = exp(-(dx^2 + dy^2) / (2.0 * sigma_pix^2))
-        end
-
-        peak = maximum(kernel_channel)
-        if peak > 0.0
-            kernel_channel ./= peak
-        end
-
-        push!(kernel, kernel_channel)
-        push!(beam_area_pix2, sum(kernel_channel))
+    for channel in 1:nchan
+        frequency = w.crval[3] + (channel - w.crpix[3]) * w.cdelt[3]
+        fwhm_arcsec = 1.22 * c_speed / (frequency * diameter) * (180 / pi) * 3600
+        sigma_pix = fwhm_arcsec * gaussian_fwhm_to_sigma / params["pixel_size"]
+        cy, cx = (ny + 1) / 2, (nx + 1) / 2
+        beam = [exp(-((y - cy)^2 + (x - cx)^2) / (2sigma_pix^2)) for y in 1:ny, x in 1:nx]
+        beam ./= maximum(beam)
+        push!(kernel, beam)
+        push!(beam_area_pix2, sum(beam))
     end
     return kernel, beam_area_pix2
 end
@@ -504,63 +378,18 @@ end
 # FITS export utilities for maps and cubes
 
 function wcs_to_header_vectors(w::WCSTransform)
-    header_str = WCS.to_header(w)
+    # These cube transforms are axis-aligned TAN celestial + linear frequency.
+    # Build cards directly: WCS.to_header emits fixed-width FITS cards, not lines.
     h_keys = String[]
     h_vals = Any[]
-    h_comms = String[]
-    
-    lines = split(header_str, '\n')
-    for line in lines
-        line = rstrip(line)
-        if isempty(line) || line == "END"
-            continue
-        end
-        if length(line) < 8
-            continue
-        end
-        key = rstrip(line[1:8])
-        if key == "CONTINUE" || key == "COMMENT" || key == "HISTORY"
-            val_and_comment = length(line) > 8 ? line[9:end] : ""
-            push!(h_keys, key)
-            push!(h_vals, nothing)
-            push!(h_comms, val_and_comment)
-        else
-            if length(line) >= 10 && line[9:10] == "= "
-                value_part = line[11:end]
-                parts = split(value_part, '/'; limit=2)
-                raw_val = strip(parts[1])
-                comm = length(parts) > 1 ? strip(parts[2]) : ""
-                
-                parsed_val = nothing
-                if raw_val == "T"
-                    parsed_val = true
-                elseif raw_val == "F"
-                    parsed_val = false
-                elseif (startswith(raw_val, "'") && endswith(raw_val, "'")) || 
-                       (startswith(raw_val, "\"") && endswith(raw_val, "\""))
-                    parsed_val = raw_val[2:end-1]
-                else
-                    try
-                        parsed_val = parse(Int, raw_val)
-                    catch
-                        try
-                            parsed_val = parse(Float64, raw_val)
-                        catch
-                            parsed_val = raw_val
-                        end
-                    end
-                end
-                push!(h_keys, key)
-                push!(h_vals, parsed_val)
-                push!(h_comms, comm)
-            else
-                push!(h_keys, "COMMENT")
-                push!(h_vals, nothing)
-                push!(h_comms, line)
-            end
+    for (prefix, values) in (("CRVAL", w.crval), ("CRPIX", w.crpix),
+                             ("CDELT", w.cdelt), ("CTYPE", w.ctype), ("CUNIT", w.cunit))
+        for (axis, value) in enumerate(values)
+            push!(h_keys, "$prefix$axis")
+            push!(h_vals, value)
         end
     end
-    return h_keys, h_vals, h_comms
+    return h_keys, h_vals, fill("", length(h_keys))
 end
 
 function save_map(filename::String, map_array::AbstractArray, map_prop_dict::Dict, filter_name::String, unit::String, beam_fwhm::Real, input_cat::String)
@@ -599,11 +428,12 @@ function save_map(filename::String, map_array::AbstractArray, map_prop_dict::Dic
     header = FITSHeader(h_keys, h_vals, h_comms)
     
     FITS(filename, "w") do f
-        write(f, map_array; header=header)
+        # FITS axis 1 is x/RA; internal image arrays are (y, x).
+        write(f, permutedims(map_array); header=header)
     end
 end
 
-function save_cubes(cube_input, cube_prop_dict::Dict, params_sides::Dict, params::Dict, component_name::String, just_save::Bool=false, just_compute::Bool=false)
+function save_cubes(cube_input, cube_prop_dict::Dict, params_sides::Dict, params::Dict, component_name::String; just_save::Bool=false, just_compute::Bool=false)
     units_dict = Dict(
         "nobeam_Jy_pix" => "Jy/pixel",
         "nobeam_MJy_sr" => "MJy/sr",
@@ -641,7 +471,7 @@ function save_cubes(cube_input, cube_prop_dict::Dict, params_sides::Dict, params
             for f in 1:cube_prop_dict["shape"][1]
                 slice = smoothed_Jybeam[f, :, :]
                 kernel = cube_prop_dict["kernel"][f]
-                smoothed_Jybeam[f, :, :] = real(ifft(fft(slice) .* fft(fftshift(kernel))))
+                smoothed_Jybeam[f, :, :] = real(ifft(fft(slice) .* fft(ifftshift(kernel))))
             end
             
             cubes_dict["smoothed_Jy_beam"] = smoothed_Jybeam
@@ -653,8 +483,8 @@ function save_cubes(cube_input, cube_prop_dict::Dict, params_sides::Dict, params
             if get(params, "gen_cube_smoothed_MJy_sr", false) == true
                 smoothed_MJy_sr = zeros(Float64, size(smoothed_Jybeam)...)
                 for f in 1:cube_prop_dict["shape"][1]
-                    factor = cube_prop_dict["beam_area_pix2"][f] * (params["pixel_size"] * pi / 180.0 / 3600.0)^2 * 1e-6
-                    smoothed_MJy_sr[f, :, :] = smoothed_Jybeam[f, :, :] ./ factor
+                    factor = cube_prop_dict["beam_area_pix2"][f] * (params["pixel_size"] * pi / 180.0 / 3600.0)^2
+                    smoothed_MJy_sr[f, :, :] = smoothed_Jybeam[f, :, :] ./ factor .* 1e-6
                 end
                 cubes_dict["smoothed_MJy_sr"] = smoothed_MJy_sr
                 push!(cubes2save, "smoothed_MJy_sr")
@@ -692,7 +522,7 @@ function save_cubes(cube_input, cube_prop_dict::Dict, params_sides::Dict, params
             header = FITSHeader(h_keys, h_vals, h_comms)
             
             FITS(filename, "w") do f
-                write(f, cubes_dict[cube_type]; header=header)
+                write(f, permutedims(cubes_dict[cube_type], (3, 2, 1)); header=header)
             end
         end
     end
@@ -712,6 +542,15 @@ and optional beam-smoothing convolution via FFT.
 function make_maps(cat::DataFrame, params_maps::Dict, params_sides::Dict)
     flux_filter_list = String[]
     output_path = params_maps["output_path"]
+    length(params_maps["filter_list"]) == length(params_maps["pixel_size"]) ==
+        length(params_maps["beam_fwhm_list"]) || throw(DimensionMismatch(
+            "filter_list, pixel_size and beam_fwhm_list must have equal lengths",
+        ))
+    if !("ra" in names(cat)) || !("dec" in names(cat))
+        ra, dec = gen_radec(cat, params_maps)
+        cat[!, :ra] = ustrip.(u"°", ra)
+        cat[!, :dec] = ustrip.(u"°", dec)
+    end
     
     if !isdir(output_path)
         println("Create $output_path")
@@ -726,13 +565,14 @@ function make_maps(cat::DataFrame, params_maps::Dict, params_sides::Dict)
 
         if !(Sname in names(cat))
             println("$filter_name fluxes are not included in the catalog. They are computed now...")
-            params_temp = copy(params_sides)
-            params_temp["filter_list"] = [filter_name]
-            cat = gen_fluxes_filter(cat, params_temp)
+            table = load_filter_table(joinpath(params_sides["grid_filter_path"], filter_name * ".h5"))
+            cat[!, Symbol(Sname)] = filter_flux_one(
+                cat.redshift, cat.Umean, cat.LIR, cat.mu, cat.issb, cat.qflag, table,
+            )
         end
 
         println("Set World Coordinates System...")
-        map_prop_dict = set_wcs_map(cat, pixel_size, params_sides)
+        map_prop_dict = set_wcs_map(cat, pixel_size, params_maps)
 
         histo = compute_histogram2d(
             map_prop_dict["pos"][1],
@@ -758,6 +598,7 @@ function make_maps(cat::DataFrame, params_maps::Dict, params_sides::Dict)
            get(params_maps, "gen_map_smoothed_MJy_sr", false) == true
 
             println("Convolve the map by the beam...")
+            isfinite(beam_fwhm) && beam_fwhm > 0 || throw(ArgumentError("beam FWHM must be positive and finite"))
             sigma_pix = beam_fwhm * gaussian_fwhm_to_sigma / pixel_size
 
             ny = map_prop_dict["shape"][1]
@@ -772,7 +613,7 @@ function make_maps(cat::DataFrame, params_maps::Dict, params_sides::Dict)
                 kernel[i, j] = exp(-(dx^2 + dy^2) / (2.0 * sigma_pix^2))
             end
 
-            histo_conv = real(ifft(fft(histo) .* fft(fftshift(kernel))))
+            histo_conv = real(ifft(fft(histo) .* fft(ifftshift(kernel))))
 
             if get(params_maps, "gen_map_smoothed_Jy_beam", false) == true
                 filename = joinpath(output_path, params_maps["run_name"] * "_" * filter_name * "_smoothed_Jy_beam.fits")
@@ -780,8 +621,8 @@ function make_maps(cat::DataFrame, params_maps::Dict, params_sides::Dict)
             end
 
             if get(params_maps, "gen_map_smoothed_MJy_sr", false) == true
-                conv_factor = sum(kernel) * (pixel_size * pi / 180.0 / 3600.0)^2 * 1e-6
-                map_temp = histo_conv ./ conv_factor
+                conv_factor = sum(kernel) * (pixel_size * pi / 180.0 / 3600.0)^2
+                map_temp = histo_conv ./ conv_factor .* 1e-6
                 filename = joinpath(output_path, params_maps["run_name"] * "_" * filter_name * "_smoothed_MJy_sr.fits")
                 save_map(filename, map_temp, map_prop_dict, filter_name, "MJy/sr", beam_fwhm, params_maps["sides_cat_path"])
             end
@@ -791,12 +632,7 @@ function make_maps(cat::DataFrame, params_maps::Dict, params_sides::Dict)
 end
 
 function channel_flux_densities(cat::DataFrame, params_sides::Dict, params::Dict)
-    freq_min = params["freq_min"]
-    freq_max = params["freq_max"]
-    freq_resol = params["freq_resol"]
-    
-    num_steps = round(Int, 1.0 + (freq_max - freq_min) / freq_resol)
-    channels = range(freq_min, stop=freq_max, length=num_steps)
+    channels = cube_frequencies(params)
 
     lambda_list = (c_speed * 1e6) ./ channels
     SED_dict = load_sed_pickle_equivalent(params_sides["SED_file"])
@@ -839,9 +675,8 @@ function make_continuum_cube(cat::DataFrame, params_sides::Dict, params::Dict, c
         cube_prop_dict, 
         params_sides, 
         params, 
-        "continuum", 
-        false, 
-        !params["save_continuum_only"]
+        "continuum";
+        just_compute = !get(params, "save_continuum_only", false)
     )
     return continuum_cubes
 end
@@ -858,7 +693,7 @@ function line_channel_flux_densities(line::String, rest_freq::Real, cat::DataFra
     worldcoords[3, :] = freq_obs .* 1e9
 
     pixcoords = world_to_pix(w, worldcoords)
-    channel = pixcoords[3, :]
+    channel = pixcoords[3, :] .- 1.0 # Histogram coordinates are zero-based.
 
     nudelt = abs(w.cdelt[3]) * 1e-9
     c_kms = c_speed * 1e-3
@@ -1051,7 +886,7 @@ function make_cube(cat::DataFrame, params_sides::Dict, params_cube::Dict)
 
             if get(params_cube, "save_all_lines", false) == true
                 println("Save the cube(s) with all the lines...")
-                save_cubes(combined_cubes, cube_prop_dict, params_sides, params_cube, "all_lines_$(CII_relation_name)", true)
+                save_cubes(combined_cubes, cube_prop_dict, params_sides, params_cube, "all_lines_$(CII_relation_name)"; just_save=true)
             end
 
             if get(params_cube, "save_full", false) == true
@@ -1059,7 +894,7 @@ function make_cube(cat::DataFrame, params_sides::Dict, params_cube::Dict)
                     combined_cubes[key] .+= continuum_cubes[key]
                 end
                 println("Save the full cube(s) containing continuum + lines...")
-                save_cubes(combined_cubes, cube_prop_dict, params_sides, params_cube, "full_$(CII_relation_name)", true)
+                save_cubes(combined_cubes, cube_prop_dict, params_sides, params_cube, "full_$(CII_relation_name)"; just_save=true)
             end
         end
     end
