@@ -1,4 +1,5 @@
 using Reactant
+using Reactant: ProbProg
 using SpecialFunctions: erf
 
 const MPC_TO_M = 3.0856775814913673e22
@@ -557,4 +558,28 @@ function forward_model(inputs, params, noise)
         noise,
     )
     return (; sfr..., mu, dust..., filter_fluxes, lines...)
+end
+
+function forward_model_impulse(rng, inputs, base_params, noise)
+
+    _, m0 = ProbProg.sample(
+        rng, ProbProg.Normal(0.0, 2.0, (1,)); symbol=:m0
+    )
+
+    _, a0 = ProbProg.sample(
+        rng, ProbProg.Normal(0.0, 2.0, (1,)); symbol=:a0
+    )
+
+    _, sigma_MS = ProbProg.sample(
+        rng, ProbProg.Normal(0.0, 1.0, (1,)); symbol=:sigma_MS
+    )
+
+    sfr_params = merge(
+        base_params.sfr,
+        (; m0, a0, sigma_MS)
+    )
+
+    params = merge(base_params, (; sfr=sfr_params))
+
+    return forward_model(inputs, params, noise)
 end

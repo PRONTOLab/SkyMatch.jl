@@ -242,34 +242,34 @@ end
 # 4. FULL FORWARD-MODEL PROBABILISTIC MODEL
 # ============================================================
 
-function impulse_model(rng, inputs, base_params, noise)
+# function impulse_model(rng, inputs, base_params, noise)
 
-    # Sample the three parameters.
-    _, m0 = ProbProg.sample(
-        rng, ProbProg.Normal(0.0, 2.0, (1,)); symbol=:m0
-    )
+#     # Sample the three parameters.
+#     _, m0 = ProbProg.sample(
+#         rng, ProbProg.Normal(0.0, 2.0, (1,)); symbol=:m0
+#     )
 
-    _, a0 = ProbProg.sample(
-        rng, ProbProg.Normal(0.0, 2.0, (1,)); symbol=:a0
-    )
+#     _, a0 = ProbProg.sample(
+#         rng, ProbProg.Normal(0.0, 2.0, (1,)); symbol=:a0
+#     )
 
-    _, sigma_MS = ProbProg.sample(
-        rng, ProbProg.Normal(0.0, 1.0, (1,)); symbol=:sigma_MS
-    )
+#     _, sigma_MS = ProbProg.sample(
+#         rng, ProbProg.Normal(0.0, 1.0, (1,)); symbol=:sigma_MS
+#     )
 
-    # Replace the sampled parameters in the SFR parameter set.
-    sfr_params = merge(
-        base_params.sfr,
-        (; m0, a0, sigma_MS)
-    )
+#     # Replace the sampled parameters in the SFR parameter set.
+#     sfr_params = merge(
+#         base_params.sfr,
+#         (; m0, a0, sigma_MS)
+#     )
 
-    params = merge(base_params, (; sfr=sfr_params))
+#     params = merge(base_params, (; sfr=sfr_params))
 
-    # Run the complete forward model.
-    outputs = forward_model(inputs, params, noise)
+#     # Run the complete forward model.
+#     outputs = forward_model(inputs, params, noise)
 
-    return outputs
-end
+#     return outputs
+# end
 
 
 # ============================================================
@@ -291,7 +291,7 @@ function run_prior_predictive()
     rng = ReactantRNG(seed)
 
     result = @jit optimize=:probprog ProbProg.simulate(
-        rng, impulse_model, inputs_r, params_r, noise_r
+        rng, forward_model_impulse, inputs_r, params_r, noise_r
     )
 
     trace, weight, (rng_out, outputs) = result
@@ -664,7 +664,7 @@ end
 function main()
 
     # # Run the full forward model with sampled parameters.
-    # run_prior_predictive()
+    run_prior_predictive()
 
     # # Run parameter inference with NUTS.
     # nuts_result = run_nuts()
@@ -673,7 +673,7 @@ function main()
     # summarize_results(nuts_result)
 
     # println("\n========== DONE ==========")
-    run_forward_model_nuts()
+    #run_forward_model_nuts()
 
 end
 
