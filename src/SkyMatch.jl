@@ -14,5 +14,6 @@ export load_par_file,
     make_simulation_noise,
     forward_model,
     add_output_columns!,
-    gen_outputs
+    gen_outputs,
+    forward_model_impulse
 end
